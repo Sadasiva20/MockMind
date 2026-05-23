@@ -493,12 +493,7 @@ export default function InterviewInterface() {
       </section>
     </div>
   );
-}
-
-  return (
-    <div className="grid gap-8 lg:grid-cols-[320px_1fr]">
-      <section className="space-y-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-zinc-950">
-        <div className="flex flex-col gap-4">
+}        <div className="flex flex-col gap-4">
           <div>
             <p className="text-xs uppercase tracking-[0.28em] text-sky-600">Modes</p>
             <h2 className="mt-2 text-2xl font-semibold">Interview modes</h2>

@@ -1,13 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMongoClient, MONGODB_DB } from "../../lib/mongodb";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { callGeminiAPI } from "../../lib/gemini-service";
 
 const PROBLEMS_COLLECTION = process.env.MONGODB_PROBLEMS_COLLECTION ?? "problems";
 const REVIEWS_COLLECTION = process.env.MONGODB_COLLECTION ?? "interview_results";
-const GOOGLE_MODEL = process.env.GOOGLE_MODEL ?? "gemini-1.5-pro";
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY ?? process.env.MODEL_API_KEY ?? "";
-
-const aiClient = new GoogleGenerativeAI(GOOGLE_API_KEY);
 
 type Problem = {
   id: string;
@@ -107,22 +103,11 @@ Provide a concise coaching response in plain text. Include one recommended next 
 }
 
 async function evaluateWithGemini(problem: Problem, answer: string): Promise<Evaluation> {
-  const model = aiClient.getGenerativeModel({
-    model: GOOGLE_MODEL,
-    systemInstruction:
-      "You are a LeetCode interviewer who judges correctness, simulates pressure, and asks follow-up questions such as 'Can you optimize this?', 'What is time complexity?', and 'What are edge cases?'.",
-  });
+  const systemPrompt =
+    "You are a LeetCode interviewer who judges correctness, simulates pressure, and asks follow-up questions such as 'Can you optimize this?', 'What is time complexity?', and 'What are edge cases?'. " +
+    buildEvaluationPrompt(problem, answer);
 
-  const response = await model.generateContent({
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: buildEvaluationPrompt(problem, answer) }],
-      },
-    ],
-  });
-
-  const rawText = response.response.text();
+  const rawText = await callGeminiAPI(systemPrompt);
   try {
     return cleanJson(rawText) as Evaluation;
   } catch {
@@ -172,8 +157,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Request must include a command." }, { status: 400 });
   }
 
-  if (!GOOGLE_API_KEY) {
-    return NextResponse.json({ error: "Missing GOOGLE_API_KEY or MODEL_API_KEY environment variable." }, { status: 500 });
+  if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    return NextResponse.json({ error: "Missing GOOGLE_APPLICATION_CREDENTIALS environment variable." }, { status: 500 });
   }
 
   const mongoClient = await getMongoClient();
@@ -216,22 +201,10 @@ export async function POST(request: NextRequest) {
       historySummary,
     });
 
-    const agentModel = aiClient.getGenerativeModel({
-      model: GOOGLE_MODEL,
-      systemInstruction:
-        "You are a MongoDB-powered coding coach that uses stored session history to recommend next actions for the user.",
-    });
-
-    const agentResponse = await agentModel.generateContent({
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: agentPrompt }],
-        },
-      ],
-    });
-
-    const agentAdvice = agentResponse.response.text().trim();
+    const systemInstruction =
+      "You are a MongoDB-powered coding coach that uses stored session history to recommend next actions for the user. " +
+      agentPrompt;
+    const agentAdvice = (await callGeminiAPI(systemInstruction)).trim();
     const nextAction =
       evaluation.correctness === "correct"
         ? "Try a slightly harder problem or review the follow-up question."
@@ -257,23 +230,13 @@ export async function POST(request: NextRequest) {
       historySummary,
     });
 
-    const agentModel = aiClient.getGenerativeModel({
-      model: GOOGLE_MODEL,
-      systemInstruction:
-        "You are a MongoDB-powered coding coach that uses stored session history to summarize a user's interview progress.",
-    });
-
-    const agentResponse = await agentModel.generateContent({
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: agentPrompt }],
-        },
-      ],
-    });
+    const systemInstruction =
+      "You are a MongoDB-powered coding coach that uses stored session history to summarize a user's interview progress. " +
+      agentPrompt;
+    const agentAdvice = (await callGeminiAPI(systemInstruction)).trim();
 
     return NextResponse.json({
-      agentAdvice: agentResponse.response.text().trim(),
+      agentAdvice,
       progressSummary: historySummary,
       nextAction: "Pick a topic or ask the coach for a recommended problem.",
     });
@@ -302,23 +265,13 @@ export async function POST(request: NextRequest) {
       historySummary,
     });
 
-    const agentModel = aiClient.getGenerativeModel({
-      model: GOOGLE_MODEL,
-      systemInstruction:
-        "You are a MongoDB-powered coding coach that recommends a new practice problem based on the user's stored history and selected preferences.",
-    });
-
-    const agentResponse = await agentModel.generateContent({
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: agentPrompt }],
-        },
-      ],
-    });
+    const systemInstruction =
+      "You are a MongoDB-powered coding coach that recommends a new practice problem based on the user's stored history and selected preferences. " +
+      agentPrompt;
+    const agentAdvice = (await callGeminiAPI(systemInstruction)).trim();
 
     return NextResponse.json({
-      agentAdvice: agentResponse.response.text().trim(),
+      agentAdvice,
       progressSummary: historySummary,
       nextAction: "Solve this new problem and submit your answer to the coach.",
       problem,

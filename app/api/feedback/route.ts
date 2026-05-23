@@ -1,13 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMongoClient, MONGODB_DB } from "../../lib/mongodb";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { callGeminiAPI } from "../../lib/gemini-service";
 
 const PROBLEMS_COLLECTION = process.env.MONGODB_PROBLEMS_COLLECTION ?? "problems";
 const INTERVIEW_COLLECTION = process.env.MONGODB_COLLECTION ?? "interview_results";
-const GOOGLE_MODEL = process.env.GOOGLE_MODEL ?? "gemini-1.5-pro";
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY ?? process.env.MODEL_API_KEY ?? "";
-
-const aiClient = new GoogleGenerativeAI(GOOGLE_API_KEY);
 
 type Problem = {
   id: string;
@@ -55,22 +51,11 @@ Do not include any additional text outside the JSON object.`;
 }
 
 async function evaluateWithGemini(problem: Problem, answer: string): Promise<Evaluation> {
-  const model = aiClient.getGenerativeModel({
-    model: GOOGLE_MODEL,
-    systemInstruction:
-      "You are a LeetCode interviewer who judges correctness, simulates pressure, and asks follow-up questions such as 'Can you optimize this?', 'What is time complexity?', and 'What are edge cases?'.",
-  });
+  const systemPrompt =
+    "You are a LeetCode interviewer who judges correctness, simulates pressure, and asks follow-up questions such as 'Can you optimize this?', 'What is time complexity?', and 'What are edge cases?'. " +
+    buildEvaluationPrompt(problem, answer);
 
-  const response = await model.generateContent({
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: buildEvaluationPrompt(problem, answer) }],
-      },
-    ],
-  });
-
-  const rawText = response.response.text();
+  const rawText = await callGeminiAPI(systemPrompt);
   try {
     return JSON.parse(rawText) as Evaluation;
   } catch {
@@ -112,9 +97,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (!GOOGLE_API_KEY) {
+  if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     return NextResponse.json(
-      { error: "Missing GOOGLE_API_KEY environment variable." },
+      { error: "Missing GOOGLE_APPLICATION_CREDENTIALS environment variable." },
       { status: 500 }
     );
   }
