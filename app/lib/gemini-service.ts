@@ -1,12 +1,24 @@
 import { GoogleAuth } from "google-auth-library";
-import fetch from "node-fetch";
 
 const GOOGLE_APPLICATION_CREDENTIALS =
   process.env.GOOGLE_APPLICATION_CREDENTIALS;
-const GOOGLE_MODEL = process.env.GOOGLE_MODEL ?? "gemini-2.5-flash";
+
+const PROJECT_ID =
+  process.env.GOOGLE_CLOUD_PROJECT;
+
+const LOCATION =
+  process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1";
+
+const GOOGLE_MODEL =
+  process.env.GOOGLE_MODEL ?? "gemini-2.5-flash";
+
+if (!PROJECT_ID) {
+  throw new Error(
+    "GOOGLE_CLOUD_PROJECT environment variable is missing"
+  );
+}
 
 let googleAuthClient: GoogleAuth | null = null;
-let cachedToken: { token: string; expiresAt: number } | null = null;
 
 function getGoogleAuthClient(): GoogleAuth {
   if (!googleAuthClient) {
@@ -14,68 +26,101 @@ function getGoogleAuthClient(): GoogleAuth {
       keyFilename: GOOGLE_APPLICATION_CREDENTIALS,
       scopes: [
         "https://www.googleapis.com/auth/cloud-platform",
-        "https://www.googleapis.com/auth/generative-language",
       ],
     });
   }
+
   return googleAuthClient;
 }
 
 async function getAccessToken(): Promise<string> {
-  // Return cached token if valid
-  if (cachedToken && cachedToken.expiresAt > Date.now() + 60000) {
-    return cachedToken.token;
-  }
-
   const auth = getGoogleAuthClient();
+
   const client = await auth.getClient();
-  const { token, expiry } = await client.getAccessToken();
 
-  cachedToken = {
-    token: token || "",
-    expiresAt: expiry || Date.now() + 3600000,
-  };
+  const accessTokenResponse =
+    await client.getAccessToken();
 
-  return cachedToken.token;
-}
+  const token =
+    typeof accessTokenResponse === "string"
+      ? accessTokenResponse
+      : accessTokenResponse?.token;
 
-export async function callGeminiAPI(
-  prompt: string,
-  _options?: Record<string, unknown>
-): Promise<string> {
-  const token = await getAccessToken();
-
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1/models/${GOOGLE_MODEL}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              {
-                text: prompt,
-              },
-            ],
-          },
-        ],
-      }),
-    }
-  );
-
-  if (!response.ok) {
-    const error = await response.json();
+  if (!token) {
     throw new Error(
-      `Gemini API error: ${response.status} - ${JSON.stringify(error)}`
+      "Failed to obtain Google access token"
     );
   }
 
-  const data = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+  return token;
+}
+
+type GeminiResponse = {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        text?: string;
+      }>;
+    };
+  }>;
+};
+
+export async function callGeminiAPI(
+  prompt: string,
+  options?: Record<string, unknown>
+): Promise<string> {
+  const token = await getAccessToken();
+
+  const endpoint =
+    `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT_ID}` +
+    `/locations/${LOCATION}/publishers/google/models/${GOOGLE_MODEL}:generateContent`;
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: prompt,
+            },
+          ],
+        },
+      ],
+
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 2048,
+      },
+
+      ...options,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+
+    throw new Error(
+      `Vertex AI Gemini error (${response.status}): ${errorText}`
+    );
+  }
+
+  const data =
+    (await response.json()) as GeminiResponse;
+
   const responseText =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (!responseText) {
+    throw new Error(
+      "No response returned from Gemini"
+    );
+  }
+
   return responseText;
 }
