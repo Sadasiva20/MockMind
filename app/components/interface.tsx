@@ -80,9 +80,20 @@ export default function InterviewInterface() {
   const [agentLoading, setAgentLoading] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
 
+  const [isInitialized, setIsInitialized] = useState(false);
+
   useEffect(() => {
-    loadProblem();
-  }, [selectedTopic, selectedDifficulty]);
+    // Load problem only when user explicitly changes filters or on first interaction
+    if (isInitialized) {
+      loadProblem();
+    }
+  }, [selectedTopic, selectedDifficulty, isInitialized]);
+
+  // Initialize after first render to avoid blocking page load
+  useEffect(() => {
+    const timer = setTimeout(() => setIsInitialized(true), 100);
+    return () => clearTimeout(timer);
+  }, []);
 
   async function loadProblem() {
     setError(null);

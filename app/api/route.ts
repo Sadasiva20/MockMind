@@ -1,11 +1,26 @@
 import { NextResponse } from "next/server";
 
+// This is a catch-all for /api base path.
+// In Next.js App Router, specific routes like /api/problems/route.ts take precedence.
 export async function GET() {
   return NextResponse.json({
+    message: "MockMind API",
     endpoints: {
-      problems: "/api/problems",
-      feedback: "/api/feedback",
+      problems: "GET /api/problems?topic=...&difficulty=... or ?problemId=...",
+      agent: "POST /api/agent with command in body",
+      feedback: "POST /api/feedback (legacy, use /api/agent)",
     },
-    description: "Use /api/problems to fetch a problem by topic/difficulty or problemId, and /api/feedback to submit an answer for AI evaluation.",
   });
 }
+
+export async function POST() {
+  return NextResponse.json(
+    {
+      error: "POST /api not supported. Use specific endpoints like /api/agent or /api/feedback",
+    },
+    { status: 405 }
+  );
+}
+
+
+

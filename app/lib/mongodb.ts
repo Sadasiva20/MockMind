@@ -13,7 +13,9 @@ let clientPromise: Promise<MongoClient> | undefined = globalThis._mockmindMongoC
 
 export async function getMongoClient() {
   if (!MONGODB_URI) {
-    throw new Error("Missing MONGODB_URI environment variable.");
+    throw new Error(
+      "Missing MONGODB_URI environment variable. Set it to a full Mongo connection string (e.g. mongodb+srv://...)."
+    );
   }
   if (!clientPromise) {
     clientPromise = mongoClient.connect();
@@ -21,5 +23,6 @@ export async function getMongoClient() {
   }
   return clientPromise;
 }
+
 
 export { MONGODB_DB };

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMongoClient, MONGODB_DB } from "../../lib/mongodb";
-import { callGeminiAPI } from "../../lib/gemini-service";
+import { callGeminiAPI, hasAIConfig } from "../../lib/gemini-service-safe";
 
 const PROBLEMS_COLLECTION = process.env.MONGODB_PROBLEMS_COLLECTION ?? "problems";
 const REVIEWS_COLLECTION = process.env.MONGODB_COLLECTION ?? "interview_results";
@@ -107,7 +107,22 @@ async function evaluateWithGemini(problem: Problem, answer: string): Promise<Eva
     "You are a LeetCode interviewer who judges correctness, simulates pressure, and asks follow-up questions such as 'Can you optimize this?', 'What is time complexity?', and 'What are edge cases?'. " +
     buildEvaluationPrompt(problem, answer);
 
-  const rawText = await callGeminiAPI(systemPrompt);
+  let rawText: string;
+  try {
+    rawText = await callGeminiAPI(systemPrompt);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      correctness: "partial",
+      confidence: "Gemini call failed.",
+      timeComplexity: "Unknown",
+      mistakes: message,
+      hint: "Fix Gemini configuration or verify Vertex AI credentials.",
+      followUp: "Try again once Gemini is configured correctly.",
+      assignedDifficulty: problem.difficulty,
+    };
+  }
+
   try {
     return cleanJson(rawText) as Evaluation;
   } catch {
@@ -129,6 +144,8 @@ async function evaluateWithGemini(problem: Problem, answer: string): Promise<Eva
 }
 
 function pickNextDifficulty(current: string, correctness: string) {
+  // Keep as string comparisons to match stored evaluation values.
+
   if (correctness === "correct") {
     return current === "Easy" ? "Medium" : current === "Medium" ? "Hard" : "Hard";
   }
@@ -143,9 +160,18 @@ function summarizeHistory(records: Array<{ evaluation: Evaluation }>) {
     return "No previous interview sessions found. The agent can help you build a study plan from your first attempt.";
   }
 
-  const counts = { correct: 0, partial: 0, incorrect: 0 };
+  const counts: Record<"correct" | "partial" | "incorrect", number> = {
+    correct: 0,
+    partial: 0,
+    incorrect: 0,
+  };
+
   records.forEach((record) => {
-    counts[record.evaluation.correctness] = (counts as any)[record.evaluation.correctness] + 1;
+    const key = record.evaluation.correctness as
+      | "correct"
+      | "partial"
+      | "incorrect";
+    if (key in counts) counts[key] = counts[key] + 1;
   });
 
   return `In ${records.length} sessions, you have ${counts.correct} correct, ${counts.partial} partial, and ${counts.incorrect} incorrect reviews. The coach will focus on steady improvement and balanced difficulty progression.`;
@@ -157,11 +183,24 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Request must include a command." }, { status: 400 });
   }
 
-  if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    return NextResponse.json({ error: "Missing GOOGLE_APPLICATION_CREDENTIALS environment variable." }, { status: 500 });
+  if (!hasAIConfig()) {
+    return NextResponse.json(
+      {
+        error:
+          "AI not configured. Set GOOGLE_API_KEY or USE_MOCK_GEMINI=true for Gemini, or FALLBACK_AI_API_URL and FALLBACK_AI_API_KEY for a fallback provider.",
+      },
+      { status: 500 }
+    );
   }
 
-  const mongoClient = await getMongoClient();
+  let mongoClient;
+  try {
+    mongoClient = await getMongoClient();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+
   const db = mongoClient.db(MONGODB_DB);
   const problems = db.collection(PROBLEMS_COLLECTION);
   const reviews = db.collection(REVIEWS_COLLECTION);
@@ -192,7 +231,7 @@ export async function POST(request: NextRequest) {
     });
 
     const history = await reviews.find({ userId }).sort({ createdAt: -1 }).limit(20).toArray();
-    const historySummary = summarizeHistory(history as Array<{ evaluation: Evaluation }>);
+    const historySummary = summarizeHistory(history as unknown as Array<{ evaluation: Evaluation }>);
     const agentPrompt = buildAgentPrompt({
       userId,
       command: "submit_answer",
@@ -223,7 +262,7 @@ export async function POST(request: NextRequest) {
 
   if (body.command === "review_progress") {
     const history = await reviews.find({ userId }).sort({ createdAt: -1 }).limit(20).toArray();
-    const historySummary = summarizeHistory(history as Array<{ evaluation: Evaluation }>);
+    const historySummary = summarizeHistory(history as unknown as Array<{ evaluation: Evaluation }>);
     const agentPrompt = buildAgentPrompt({
       userId,
       command: "review_progress",
@@ -257,7 +296,7 @@ export async function POST(request: NextRequest) {
     }
 
     const history = await reviews.find({ userId }).sort({ createdAt: -1 }).limit(20).toArray();
-    const historySummary = summarizeHistory(history as Array<{ evaluation: Evaluation }>);
+    const historySummary = summarizeHistory((history as unknown) as Array<{ evaluation: Evaluation }>);
     const agentPrompt = buildAgentPrompt({
       userId,
       command: "recommend_problem",

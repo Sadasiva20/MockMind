@@ -54,6 +54,31 @@ npm run dev
 
 4. Open [http://localhost:3000](http://localhost:3000).
 
+## Troubleshooting
+
+- If `http://localhost:3000/api` returns 404 or the app fails to load problems, confirm the server is running and the correct port is used.
+- Verify `.env.local` is loaded and contains:
+  - `MONGODB_URI`
+  - `MONGODB_DB` (optional; defaults to `mockmind`)
+  - `MONGODB_PROBLEMS_COLLECTION` (optional; defaults to `problems`)
+  - `GOOGLE_API_KEY` or `MODEL_API_KEY`
+- If `/api/problems` returns 404, the most common causes are:
+  - the database was not seeded with `npm run seed:db`
+  - the collection name in `MONGODB_PROBLEMS_COLLECTION` does not match the seeded collection
+  - the database name in `MONGODB_DB` does not match the target database
+- To confirm seed data was added correctly:
+  1. Run `npm run seed:db`
+  2. Check MongoDB for the `problems` collection in the `mockmind` database (or your configured database)
+  3. Verify documents exist in that collection
+- If a problem-specific request returns `404` from `/api/problems?problemId=...`, it usually means the requested `problemId` is not present in the seeded data or the query parameters are malformed.
+- For API route troubleshooting, use the root endpoint first:
+
+```bash
+curl http://localhost:3000/api
+```
+
+It should return a JSON object with endpoints for `/api/problems`, `/api/agent`, and `/api/feedback`.
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](./LICENSE) file for details.
