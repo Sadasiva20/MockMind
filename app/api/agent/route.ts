@@ -1,29 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMongoClient, MONGODB_DB } from "../../lib/mongodb";
-import { callGeminiAPI, hasAIConfig } from "../../lib/gemini-service-safe";
+import { callGeminiAPI } from "../../lib/gemini-service";
+import { hasAIConfig } from "../../lib/gemini-service-safe";
+
+
+import { type Problem as EngineProblem, type Evaluation as EngineEvaluation, runSubmitAnswerAgent } from "../../agent/agent-engine";
+
 
 const PROBLEMS_COLLECTION = process.env.MONGODB_PROBLEMS_COLLECTION ?? "problems";
 const REVIEWS_COLLECTION = process.env.MONGODB_COLLECTION ?? "interview_results";
 
-type Problem = {
-  id: string;
-  title: string;
-  description: string;
-  instructions?: string;
-  topic: string;
-  difficulty: string;
-  hints?: string[];
-};
+type Problem = EngineProblem;
 
-type Evaluation = {
-  correctness: string;
-  confidence: string;
-  timeComplexity: string;
-  mistakes: string;
-  hint: string;
-  followUp: string;
-  assignedDifficulty: string;
-};
+type Evaluation = EngineEvaluation;
 
 function cleanJson(text: string) {
   try {
@@ -216,8 +205,28 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid problemId." }, { status: 400 });
     }
 
-    const evaluation = await evaluateWithGemini(problem, body.answer);
-    const assignedDifficulty = pickNextDifficulty(problem.difficulty, evaluation.correctness);
+    const historyForEngine = await reviews
+      .find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .toArray();
+    const historySummaryForEngine = summarizeHistory(
+      historyForEngine as unknown as Array<{ evaluation: Evaluation }>
+    );
+
+
+    const engineResult = await runSubmitAnswerAgent({
+      userId,
+      command: "submit_answer",
+      currentProblem: problem,
+      answer: body.answer,
+      historySummary: historySummaryForEngine,
+    });
+
+
+    const evaluation = engineResult.feedback;
+    const assignedDifficulty = engineResult.assignedDifficulty;
+
     await reviews.insertOne({
       userId,
       problemId: problem.id,
@@ -230,15 +239,23 @@ export async function POST(request: NextRequest) {
       createdAt: new Date(),
     });
 
-    const history = await reviews.find({ userId }).sort({ createdAt: -1 }).limit(20).toArray();
-    const historySummary = summarizeHistory(history as unknown as Array<{ evaluation: Evaluation }>);
+    const historyAfterInsert = await reviews
+      .find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .toArray();
+    const historySummaryAfterInsert = summarizeHistory(
+      historyAfterInsert as unknown as Array<{ evaluation: Evaluation }>
+    );
+
     const agentPrompt = buildAgentPrompt({
       userId,
       command: "submit_answer",
       currentProblem: problem,
       evaluation,
-      historySummary,
+      historySummary: historySummaryAfterInsert,
     });
+
 
     const systemInstruction =
       "You are a MongoDB-powered coding coach that uses stored session history to recommend next actions for the user. " +
@@ -255,18 +272,34 @@ export async function POST(request: NextRequest) {
       feedback: evaluation,
       assignedDifficulty,
       agentAdvice,
-      progressSummary: historySummary,
+      progressSummary: historySummaryAfterInsert,
       nextAction,
+    });
+  }
+
+
+  if (body.command === "chat") {
+    if (typeof body.prompt !== "string" || !body.prompt.trim()) {
+      return NextResponse.json(
+        { error: "chat command requires a non-empty prompt." },
+        { status: 400 }
+      );
+    }
+
+    const agentResponse = await callGeminiAPI(body.prompt.trim());
+
+    return NextResponse.json({
+      agentAdvice: agentResponse,
     });
   }
 
   if (body.command === "review_progress") {
     const history = await reviews.find({ userId }).sort({ createdAt: -1 }).limit(20).toArray();
-    const historySummary = summarizeHistory(history as unknown as Array<{ evaluation: Evaluation }>);
+    const historySummaryReview = summarizeHistory(history as unknown as Array<{ evaluation: Evaluation }>);
     const agentPrompt = buildAgentPrompt({
       userId,
       command: "review_progress",
-      historySummary,
+      historySummary: historySummaryReview,
     });
 
     const systemInstruction =
@@ -276,7 +309,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       agentAdvice,
-      progressSummary: historySummary,
+      progressSummary: historySummaryReview,
       nextAction: "Pick a topic or ask the coach for a recommended problem.",
     });
   }
@@ -295,13 +328,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No matching problems found." }, { status: 404 });
     }
 
-    const history = await reviews.find({ userId }).sort({ createdAt: -1 }).limit(20).toArray();
-    const historySummary = summarizeHistory((history as unknown) as Array<{ evaluation: Evaluation }>);
+    const historyRecommend = await reviews.find({ userId }).sort({ createdAt: -1 }).limit(20).toArray();
+    const historySummaryRecommend = summarizeHistory((historyRecommend as unknown) as Array<{ evaluation: Evaluation }>);
     const agentPrompt = buildAgentPrompt({
       userId,
       command: "recommend_problem",
       currentProblem: problem,
-      historySummary,
+      historySummary: historySummaryRecommend,
     });
 
     const systemInstruction =
@@ -311,7 +344,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       agentAdvice,
-      progressSummary: historySummary,
+      progressSummary: historySummaryRecommend,
       nextAction: "Solve this new problem and submit your answer to the coach.",
       problem,
     });

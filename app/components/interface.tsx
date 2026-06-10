@@ -179,6 +179,9 @@ export default function InterviewInterface() {
   }
 
   async function submitAnswer() {
+    // Deprecated by agent-page navigation; kept for potential reuse.
+
+
     if (!problem) return;
 
     setIsSubmitting(true);
@@ -196,13 +199,26 @@ export default function InterviewInterface() {
         answer,
       });
 
-      if (!data || !data.feedback || !data.assignedDifficulty) {
+      if (!data || !data.assignedDifficulty) {
         throw new Error("Invalid agent response.");
       }
 
-      setFeedback(data.feedback);
+      // Backend contract is expected to be { feedback: Evaluation }.
+      // Normalize in case the API returns a legacy shape.
+      const normalizedFeedback: Evaluation | null =
+        (data.feedback as Evaluation | undefined) ??
+        // @ts-expect-error - tolerate legacy shapes
+        (data.evaluation as Evaluation | undefined) ??
+        null;
+
+      if (!normalizedFeedback) {
+        throw new Error("Agent response missing feedback.");
+      }
+
+      setFeedback(normalizedFeedback);
 
       setAssignedDifficulty(data.assignedDifficulty);
+
 
       setAgentAdvice(data.agentAdvice ?? null);
       setProgressSummary(data.progressSummary ?? null);
@@ -217,13 +233,14 @@ export default function InterviewInterface() {
         ].slice(0, 5)
       );
 
-      if (data.feedback.correctness === "correct") {
+      if (normalizedFeedback?.correctness === "correct") {
         setTimeout(() => {
           loadProblem();
           setAnswer("");
           setFeedback(null);
         }, 1200);
       }
+
     } catch (err) {
       setError(
         err instanceof Error
@@ -423,6 +440,11 @@ export default function InterviewInterface() {
                       <p className="font-semibold">Instructions</p>
 
                       <p>{problem.instructions}</p>
+
+                      <div>
+                        <p className="font-semibold">Problem description</p>
+                        <p>{problem.description}</p>
+                      </div>
                     </div>
 
                     {problem.hints?.length ? (
@@ -541,13 +563,13 @@ export default function InterviewInterface() {
 
                 <button
                   type="button"
-                  onClick={submitAnswer}
+                  onClick={() => {
+                    void submitAnswer();
+                  }}
                   disabled={isSubmitting || !problem}
                   className="inline-flex items-center justify-center rounded-3xl bg-sky-600 px-6 py-3 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-300 dark:disabled:bg-slate-700"
                 >
-                  {isSubmitting
-                    ? "Reviewing..."
-                    : "Submit for AI evaluation"}
+                  {isSubmitting ? "Reviewing..." : "Submit for AI evaluation"}
                 </button>
               </div>
             </div>
@@ -564,149 +586,83 @@ export default function InterviewInterface() {
               </div>
             ) : null}
 
+            {/* Inline Agent auto-evaluation section (from app/agent/agent.tsx) */}
             <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-zinc-950">
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="text-sm uppercase tracking-[0.24em] text-sky-600">
-                    Feedback
+                    Auto evaluation
                   </p>
-
-                  <h3 className="mt-2 text-2xl font-semibold">
-                    AI evaluation
-                  </h3>
+                  <h3 className="mt-2 text-2xl font-semibold">AI evaluation</h3>
                 </div>
 
-                {feedback ? (
-                  <span
-                    className={`rounded-2xl px-3 py-1 text-sm font-semibold ${
-                      feedback.correctness === "correct"
+                <span
+                  className={`rounded-2xl px-3 py-1 text-sm font-semibold ${
+                    feedback
+                      ? feedback.correctness === "correct"
                         ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
                         : "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
-                    }`}
-                  >
-                    {feedback.correctness === "correct"
-                      ? "Looks good"
-                      : "Needs improvement"}
-                  </span>
-                ) : (
-                  <span className="rounded-2xl bg-slate-100 px-3 py-1 text-sm text-slate-600 dark:bg-slate-900 dark:text-slate-300">
-                    Awaiting submission
-                  </span>
-                )}
+                      : "bg-slate-100 text-slate-600 dark:bg-slate-900 dark:text-slate-300"
+                  }`}
+                >
+                  {isSubmitting
+                    ? "Evaluating..."
+                    : feedback
+                      ? feedback.correctness === "correct"
+                        ? "Looks good"
+                        : "Needs improvement"
+                      : "Awaiting submission"}
+                </span>
               </div>
 
-              <div className="mt-5 space-y-5 text-sm leading-7 text-slate-700 dark:text-slate-300">
-                <div className="rounded-3xl bg-slate-50 p-5 dark:bg-slate-900">
-                  <p className="font-semibold">Correctness</p>
-
-                  <p className="mt-2">
-                    {feedback
-                      ? feedback.correctness
-                      : "Submit your answer to see feedback."}
-                  </p>
-                </div>
-
-                <div className="grid gap-4 lg:grid-cols-3">
-                  <div className="rounded-3xl bg-slate-50 p-5 dark:bg-slate-900">
-                    <p className="font-semibold">
-                      Time complexity
-                    </p>
-
-                    <p className="mt-2">
-                      {feedback
-                        ? feedback.timeComplexity
-                        : "Waiting for AI review."}
-                    </p>
-                  </div>
-
-                  <div className="rounded-3xl bg-slate-50 p-5 dark:bg-slate-900">
-                    <p className="font-semibold">Hint</p>
-
-                    <p className="mt-2">
-                      {feedback
-                        ? feedback.hint
-                        : "A hint will appear here."}
-                    </p>
-                  </div>
-
-                  <div className="rounded-3xl bg-slate-50 p-5 dark:bg-slate-900">
-                    <p className="font-semibold">Follow-up</p>
-
-                    <p className="mt-2">
-                      {feedback
-                        ? feedback.followUp
-                        : "A follow-up question will appear here."}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {assignedDifficulty ? (
-                <div className="mt-5 rounded-3xl bg-slate-50 p-5 text-sm dark:bg-slate-900">
-                  <p className="font-semibold">
-                    Next difficulty
-                  </p>
-
-                  <p className="mt-2">
-                    {assignedDifficulty}
-                  </p>
+              {agentError ? (
+                <div className="mt-6 rounded-3xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-800 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200">
+                  {agentError}
                 </div>
               ) : null}
-            </div>
 
-            <div className="rounded-3xl border border-slate-200 bg-slate-50 p-6 shadow-sm dark:border-slate-800 dark:bg-slate-950">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm uppercase tracking-[0.24em] text-sky-600">
-                    Coach summary
-                  </p>
+              {feedback ? (
+                <div className="mt-6 space-y-6">
+                  <div className="rounded-3xl bg-slate-50 p-5 dark:bg-zinc-900">
+                    <p className="font-semibold">Correctness</p>
+                    <p className="mt-2">{feedback.correctness}</p>
+                  </div>
 
-                  <h3 className="mt-2 text-2xl font-semibold">
-                    Agent recommendations
-                  </h3>
+                  <div className="grid gap-4 lg:grid-cols-3">
+                    <div className="rounded-3xl bg-slate-50 p-5 dark:bg-zinc-900">
+                      <p className="font-semibold">Time complexity</p>
+                      <p className="mt-2">{feedback.timeComplexity}</p>
+                    </div>
+                    <div className="rounded-3xl bg-slate-50 p-5 dark:bg-zinc-900">
+                      <p className="font-semibold">Hint</p>
+                      <p className="mt-2">{feedback.hint}</p>
+                    </div>
+                    <div className="rounded-3xl bg-slate-50 p-5 dark:bg-zinc-900">
+                      <p className="font-semibold">Follow-up</p>
+                      <p className="mt-2">{feedback.followUp}</p>
+                    </div>
+                  </div>
+
+                  {assignedDifficulty ? (
+                    <div className="rounded-3xl bg-slate-50 p-5 text-sm dark:bg-zinc-900">
+                      <p className="font-semibold">Next difficulty</p>
+                      <p className="mt-2">{assignedDifficulty}</p>
+                    </div>
+                  ) : null}
+
+                  <div className="rounded-3xl bg-slate-50 p-5 text-sm dark:bg-zinc-900">
+                    <p className="font-semibold">Coach recommendations</p>
+                    <p className="mt-2">{agentAdvice ?? "No advice returned."}</p>
+
+                    {progressSummary ? <p className="mt-4">{progressSummary}</p> : null}
+
+                    <p className="mt-4">
+                      <span className="font-semibold">Next action: </span>
+                      {nextAction ?? ""}
+                    </p>
+                  </div>
                 </div>
-
-                {agentLoading ? (
-                  <span className="rounded-2xl bg-slate-100 px-3 py-1 text-sm text-slate-600 dark:bg-slate-900 dark:text-slate-300">
-                    Analyzing...
-                  </span>
-                ) : (
-                  <span className="rounded-2xl bg-slate-100 px-3 py-1 text-sm text-slate-600 dark:bg-slate-900 dark:text-slate-300">
-                    Coach powered by Gemini + MongoDB
-                  </span>
-                )}
-              </div>
-
-              <div className="mt-5 space-y-5 text-sm leading-7 text-slate-700 dark:text-slate-300">
-                <div className="rounded-3xl bg-white p-5 dark:bg-slate-900">
-                  <p className="font-semibold">Summary</p>
-
-                  <p className="mt-2">
-                    {agentAdvice ??
-                      "Submit a solution or ask the coach to review your progress."}
-                  </p>
-                </div>
-
-                <div className="rounded-3xl bg-white p-5 dark:bg-slate-900">
-                  <p className="font-semibold">
-                    Latest progress note
-                  </p>
-
-                  <p className="mt-2">
-                    {progressSummary ??
-                      "No coach summary available yet."}
-                  </p>
-                </div>
-
-                <div className="rounded-3xl bg-white p-5 dark:bg-slate-900">
-                  <p className="font-semibold">Next action</p>
-
-                  <p className="mt-2">
-                    {nextAction ??
-                      "Ask the coach for a recommendation after submitting your first answer."}
-                  </p>
-                </div>
-              </div>
+              ) : null}
             </div>
           </div>
         )}
