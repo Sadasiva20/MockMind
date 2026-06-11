@@ -1,3 +1,5 @@
+import { GoogleAuth } from "google-auth-library";
+
 export async function callGeminiAPI(
   prompt: string,
   options?: Record<string, unknown>
@@ -7,24 +9,28 @@ export async function callGeminiAPI(
   const MODEL = process.env.GOOGLE_MODEL ?? "gemini-1.5-flash";
 
   if (!PROJECT_ID) {
-    throw new Error("Missing GOOGLE_CLOUD_PROJECT");
+    throw new Error(
+      "GOOGLE_CLOUD_PROJECT environment variable is missing"
+    );
   }
 
-  // ✅ Vertex AI expects ADC automatically on Vercel (NO key files)
+  console.log("[Gemini] Project:", PROJECT_ID);
+  console.log("[Gemini] Location:", LOCATION);
+  console.log("[Gemini] Model:", MODEL);
+
+  const accessToken = await getAccessToken();
+
   const endpoint =
     `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT_ID}` +
     `/locations/${LOCATION}/publishers/google/models/${MODEL}:generateContent`;
 
-  // ⚠️ IMPORTANT: Vercel must have GOOGLE_APPLICATION_CREDENTIALS implicitly via runtime identity
-  // OR you must rely on "gcloud auth" locally
+  console.log("[Gemini] Endpoint:", endpoint);
 
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-
-      // ⚠️ This is REQUIRED in most Vertex setups on Vercel:
-      Authorization: `Bearer ${await getAccessToken()}`,
+      Authorization: `Bearer ${accessToken}`,
     },
     body: JSON.stringify({
       contents: [
@@ -41,38 +47,82 @@ export async function callGeminiAPI(
     }),
   });
 
+  const responseText = await response.text();
+
+  console.log("[Gemini] Status:", response.status);
+  console.log("[Gemini] Raw Response:", responseText);
+
   if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Vertex AI error ${response.status}: ${err}`);
+    throw new Error(
+      `Vertex AI error ${response.status}: ${responseText}`
+    );
   }
 
-  const data = await response.json();
+  let data: any;
+
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error(
+      `Vertex AI returned non-JSON response: ${responseText}`
+    );
+  }
 
   const text =
     data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
   if (!text) {
-    throw new Error("Empty Gemini response");
+    console.error(
+      "[Gemini] Missing candidate text:",
+      JSON.stringify(data, null, 2)
+    );
+
+    throw new Error(
+      "Vertex AI returned no candidate text"
+    );
   }
 
   return text;
 }
 
-// 🔑 FIXED TOKEN METHOD (ADC SAFE)
 async function getAccessToken(): Promise<string> {
-  // On Vercel this works ONLY if runtime has Vertex AI permissions
-  const { GoogleAuth } = await import("google-auth-library");
+  try {
+    const auth = new GoogleAuth({
+      scopes: [
+        "https://www.googleapis.com/auth/cloud-platform",
+      ],
+    });
 
-  const auth = new GoogleAuth({
-    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-  });
+    const client = await auth.getClient();
 
-  const client = await auth.getClient();
-  const token = await client.getAccessToken();
+    const tokenResponse = await client.getAccessToken();
 
-  if (!token?.token) {
-    throw new Error("Failed to get Vertex AI access token");
+    const token =
+      typeof tokenResponse === "string"
+        ? tokenResponse
+        : tokenResponse?.token;
+
+    if (!token) {
+      throw new Error(
+        "GoogleAuth returned an empty access token"
+      );
+    }
+
+    console.log("[Gemini] Access token acquired");
+
+    return token;
+  } catch (error) {
+    console.error(
+      "[Gemini] Failed to obtain access token:",
+      error
+    );
+
+    throw new Error(
+      `Failed to obtain Google access token: ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    );
   }
-
-  return token.token;
 }
