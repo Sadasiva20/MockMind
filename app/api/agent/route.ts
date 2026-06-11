@@ -3,352 +3,337 @@ import { getMongoClient, MONGODB_DB } from "../../lib/mongodb";
 import { callGeminiAPI } from "../../lib/gemini-service";
 import { hasAIConfig } from "../../lib/gemini-service-safe";
 
+import {
+  type Problem as EngineProblem,
+  type Evaluation as EngineEvaluation,
+  runSubmitAnswerAgent,
+} from "../../agent/agent-engine";
 
-import { type Problem as EngineProblem, type Evaluation as EngineEvaluation, runSubmitAnswerAgent } from "../../agent/agent-engine";
-
-
-const PROBLEMS_COLLECTION = process.env.MONGODB_PROBLEMS_COLLECTION ?? "problems";
-const REVIEWS_COLLECTION = process.env.MONGODB_COLLECTION ?? "interview_results";
+const PROBLEMS_COLLECTION =
+  process.env.MONGODB_PROBLEMS_COLLECTION ?? "problems";
+const REVIEWS_COLLECTION =
+  process.env.MONGODB_COLLECTION ?? "interview_results";
 
 type Problem = EngineProblem;
-
 type Evaluation = EngineEvaluation;
 
-function cleanJson(text: string) {
+/* ---------------- SAFE HELPERS ---------------- */
+
+function safeJsonParse(text: string) {
   try {
     return JSON.parse(text);
   } catch {
-    const safeText = text.replace(/^[^{]*([\s\S]*?)[^}]*$/, "$1");
-    return JSON.parse(safeText);
+    const cleaned = text.replace(/^[^{]*/, "").replace(/[^}]*$/, "");
+    return JSON.parse(cleaned);
   }
 }
 
-function buildEvaluationPrompt(problem: Problem, answer: string) {
-  return `You are a LeetCode interviewer. Evaluate the candidate's textual solution for the following problem with interview pressure and precision.
+/* ---------------- PROMPTS ---------------- */
 
-Problem title: ${problem.title}
-Difficulty: ${problem.difficulty}
-Topic: ${problem.topic}
-Description: ${problem.description}
-Instructions: ${problem.instructions ?? "Review the problem description and provide an optimal approach."}
-Hints: ${problem.hints?.join("; ") ?? "No hints provided."}
-
-Candidate answer:
-${answer}
-
-Respond only with valid JSON containing these keys:
-- correctness: one of "correct", "partial", or "incorrect"
-- confidence: a short confidence statement
-- timeComplexity: your estimated runtime complexity
-- mistakes: what is wrong or missing in the answer
-- hint: a concise hint for improvement
-- followUp: an interview-style follow-up question
-- assignedDifficulty: recommended next problem difficulty (Easy, Medium, Hard)
-
-Do not include any additional text outside the JSON object.`;
-}
-
-function buildAgentPrompt({
-  userId,
-  command,
-  currentProblem,
-  evaluation,
-  historySummary,
-}: {
+function buildAgentPrompt(args: {
   userId: string;
   command: string;
   currentProblem?: Problem;
   evaluation?: Evaluation;
   historySummary: string;
 }) {
-  return `You are a MongoDB-powered coding coach agent built to help a developer improve their interview readiness. The agent stores session feedback and uses that history to recommend the next action.
+  const { userId, command, currentProblem, evaluation, historySummary } = args;
 
+  return `
 User ID: ${userId}
 Command: ${command}
 
-History summary:
+History:
 ${historySummary}
 
-${currentProblem ? `Current problem: ${currentProblem.title}
+${
+  currentProblem
+    ? `Current Problem:
+Title: ${currentProblem.title}
 Difficulty: ${currentProblem.difficulty}
 Topic: ${currentProblem.topic}
 Description: ${currentProblem.description}
-Instructions: ${currentProblem.instructions ?? "n/a"}
-Hints: ${currentProblem.hints?.join(", ") ?? "none"}
+Instructions: ${currentProblem.instructions ?? "n/a"}`
+    : ""
+}
 
-` : ""}
-${evaluation ? `Latest evaluation:
-- Correctness: ${evaluation.correctness}
-- Confidence: ${evaluation.confidence}
-- Time complexity: ${evaluation.timeComplexity}
-- Mistakes: ${evaluation.mistakes}
-- Hint: ${evaluation.hint}
-- Follow-up: ${evaluation.followUp}
-- Assigned difficulty: ${evaluation.assignedDifficulty}
+${
+  evaluation
+    ? `Latest Evaluation:
+Correctness: ${evaluation.correctness}
+Confidence: ${evaluation.confidence}
+Time Complexity: ${evaluation.timeComplexity}
+Mistakes: ${evaluation.mistakes}
+Hint: ${evaluation.hint}
+Follow-up: ${evaluation.followUp}
+Assigned Difficulty: ${evaluation.assignedDifficulty}`
+    : ""
+}
 
-` : ""}
-Provide a concise coaching response in plain text. Include one recommended next action the user can take. Do not return JSON.
+Return a concise coaching message with ONE next action.
 `;
 }
 
-async function evaluateWithGemini(problem: Problem, answer: string): Promise<Evaluation> {
-  const systemPrompt =
-    "You are a LeetCode interviewer who judges correctness, simulates pressure, and asks follow-up questions such as 'Can you optimize this?', 'What is time complexity?', and 'What are edge cases?'. " +
-    buildEvaluationPrompt(problem, answer);
+/* ---------------- HISTORY ---------------- */
 
-  let rawText: string;
-  try {
-    rawText = await callGeminiAPI(systemPrompt);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      correctness: "partial",
-      confidence: "Gemini call failed.",
-      timeComplexity: "Unknown",
-      mistakes: message,
-      hint: "Fix Gemini configuration or verify Vertex AI credentials.",
-      followUp: "Try again once Gemini is configured correctly.",
-      assignedDifficulty: problem.difficulty,
-    };
+function summarizeHistory(
+  records: Array<{ evaluation: Evaluation }>
+): string {
+  if (!records?.length) {
+    return "No prior sessions found.";
   }
 
-  try {
-    return cleanJson(rawText) as Evaluation;
-  } catch {
-    const safeText = rawText.replace(/^[^{]*/, "").replace(/[^}]*$/, "").trim();
-    try {
-      return cleanJson(safeText) as Evaluation;
-    } catch {
-      return {
-        correctness: "partial",
-        confidence: "Could not parse model output cleanly.",
-        timeComplexity: "Unknown",
-        mistakes: rawText,
-        hint: "Review the answer and provide a compact JSON object if possible.",
-        followUp: "Explain your time complexity and edge-case handling in a few sentences.",
-        assignedDifficulty: problem.difficulty,
-      };
-    }
+  const counts = { correct: 0, partial: 0, incorrect: 0 };
+
+  for (const r of records) {
+    const c = r?.evaluation?.correctness;
+    if (c in counts) counts[c as keyof typeof counts]++;
   }
+
+  return `Sessions: ${records.length}
+Correct: ${counts.correct}
+Partial: ${counts.partial}
+Incorrect: ${counts.incorrect}`;
 }
 
-function pickNextDifficulty(current: string, correctness: string) {
-  // Keep as string comparisons to match stored evaluation values.
-
-  if (correctness === "correct") {
-    return current === "Easy" ? "Medium" : current === "Medium" ? "Hard" : "Hard";
-  }
-  if (correctness === "partial") {
-    return current === "Easy" ? "Easy" : "Medium";
-  }
-  return "Easy";
-}
-
-function summarizeHistory(records: Array<{ evaluation: Evaluation }>) {
-  if (!records.length) {
-    return "No previous interview sessions found. The agent can help you build a study plan from your first attempt.";
-  }
-
-  const counts: Record<"correct" | "partial" | "incorrect", number> = {
-    correct: 0,
-    partial: 0,
-    incorrect: 0,
-  };
-
-  records.forEach((record) => {
-    const key = record.evaluation.correctness as
-      | "correct"
-      | "partial"
-      | "incorrect";
-    if (key in counts) counts[key] = counts[key] + 1;
-  });
-
-  return `In ${records.length} sessions, you have ${counts.correct} correct, ${counts.partial} partial, and ${counts.incorrect} incorrect reviews. The coach will focus on steady improvement and balanced difficulty progression.`;
-}
+/* ---------------- MAIN ROUTE ---------------- */
 
 export async function POST(request: NextRequest) {
-  const body = await request.json().catch(() => null);
-  if (!body || typeof body.command !== "string") {
-    return NextResponse.json({ error: "Request must include a command." }, { status: 400 });
-  }
-
-  if (!hasAIConfig()) {
-    return NextResponse.json(
-      {
-        error:
-          "AI not configured. Set GOOGLE_API_KEY or USE_MOCK_GEMINI=true for Gemini, or FALLBACK_AI_API_URL and FALLBACK_AI_API_KEY for a fallback provider.",
-      },
-      { status: 500 }
-    );
-  }
-
-  let mongoClient;
   try {
-    mongoClient = await getMongoClient();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+    const body = await request.json().catch(() => null);
 
-  const db = mongoClient.db(MONGODB_DB);
-  const problems = db.collection(PROBLEMS_COLLECTION);
-  const reviews = db.collection(REVIEWS_COLLECTION);
-  const userId = typeof body.userId === "string" ? body.userId : "local-user";
-
-  if (body.command === "submit_answer") {
-    if (typeof body.problemId !== "string" || typeof body.answer !== "string") {
-      return NextResponse.json({ error: "submit_answer requires problemId and answer." }, { status: 400 });
-    }
-
-    const problem = await problems.findOne<Problem>({ id: body.problemId });
-    if (!problem) {
-      return NextResponse.json({ error: "Invalid problemId." }, { status: 400 });
-    }
-
-    const historyForEngine = await reviews
-      .find({ userId })
-      .sort({ createdAt: -1 })
-      .limit(20)
-      .toArray();
-    const historySummaryForEngine = summarizeHistory(
-      historyForEngine as unknown as Array<{ evaluation: Evaluation }>
-    );
-
-
-    const engineResult = await runSubmitAnswerAgent({
-      userId,
-      command: "submit_answer",
-      currentProblem: problem,
-      answer: body.answer,
-      historySummary: historySummaryForEngine,
-    });
-
-
-    const evaluation = engineResult.feedback;
-    const assignedDifficulty = engineResult.assignedDifficulty;
-
-    await reviews.insertOne({
-      userId,
-      problemId: problem.id,
-      problemTitle: problem.title,
-      problemDifficulty: problem.difficulty,
-      topic: problem.topic,
-      answer: body.answer,
-      evaluation,
-      assignedDifficulty,
-      createdAt: new Date(),
-    });
-
-    const historyAfterInsert = await reviews
-      .find({ userId })
-      .sort({ createdAt: -1 })
-      .limit(20)
-      .toArray();
-    const historySummaryAfterInsert = summarizeHistory(
-      historyAfterInsert as unknown as Array<{ evaluation: Evaluation }>
-    );
-
-    const agentPrompt = buildAgentPrompt({
-      userId,
-      command: "submit_answer",
-      currentProblem: problem,
-      evaluation,
-      historySummary: historySummaryAfterInsert,
-    });
-
-
-    const systemInstruction =
-      "You are a MongoDB-powered coding coach that uses stored session history to recommend next actions for the user. " +
-      agentPrompt;
-    const agentAdvice = (await callGeminiAPI(systemInstruction)).trim();
-    const nextAction =
-      evaluation.correctness === "correct"
-        ? "Try a slightly harder problem or review the follow-up question."
-        : evaluation.correctness === "partial"
-        ? "Revise your solution to fix the reported issues and resubmit."
-        : "Review the hint, adjust your approach, and try again.";
-
-    return NextResponse.json({
-      feedback: evaluation,
-      assignedDifficulty,
-      agentAdvice,
-      progressSummary: historySummaryAfterInsert,
-      nextAction,
-    });
-  }
-
-
-  if (body.command === "chat") {
-    if (typeof body.prompt !== "string" || !body.prompt.trim()) {
+    if (!body?.command || typeof body.command !== "string") {
       return NextResponse.json(
-        { error: "chat command requires a non-empty prompt." },
+        { error: "Missing command" },
         { status: 400 }
       );
     }
 
-    const agentResponse = await callGeminiAPI(body.prompt.trim());
-
-    return NextResponse.json({
-      agentAdvice: agentResponse,
-    });
-  }
-
-  if (body.command === "review_progress") {
-    const history = await reviews.find({ userId }).sort({ createdAt: -1 }).limit(20).toArray();
-    const historySummaryReview = summarizeHistory(history as unknown as Array<{ evaluation: Evaluation }>);
-    const agentPrompt = buildAgentPrompt({
-      userId,
-      command: "review_progress",
-      historySummary: historySummaryReview,
-    });
-
-    const systemInstruction =
-      "You are a MongoDB-powered coding coach that uses stored session history to summarize a user's interview progress. " +
-      agentPrompt;
-    const agentAdvice = (await callGeminiAPI(systemInstruction)).trim();
-
-    return NextResponse.json({
-      agentAdvice,
-      progressSummary: historySummaryReview,
-      nextAction: "Pick a topic or ask the coach for a recommended problem.",
-    });
-  }
-
-  if (body.command === "recommend_problem") {
-    const filter: Record<string, unknown> = {};
-    if (typeof body.topic === "string" && body.topic !== "all") filter.topic = body.topic.toLowerCase();
-    if (typeof body.difficulty === "string" && body.difficulty !== "all") filter.difficulty = body.difficulty.toLowerCase();
-
-    const pipeline: Record<string, unknown>[] = [];
-    if (Object.keys(filter).length > 0) pipeline.push({ $match: filter });
-    pipeline.push({ $sample: { size: 1 } });
-
-    const [problem] = await problems.aggregate<Problem>(pipeline).toArray();
-    if (!problem) {
-      return NextResponse.json({ error: "No matching problems found." }, { status: 404 });
+    if (!hasAIConfig()) {
+      return NextResponse.json(
+        { error: "AI not configured (missing GOOGLE_API_KEY)" },
+        { status: 500 }
+      );
     }
 
-    const historyRecommend = await reviews.find({ userId }).sort({ createdAt: -1 }).limit(20).toArray();
-    const historySummaryRecommend = summarizeHistory((historyRecommend as unknown) as Array<{ evaluation: Evaluation }>);
-    const agentPrompt = buildAgentPrompt({
-      userId,
-      command: "recommend_problem",
-      currentProblem: problem,
-      historySummary: historySummaryRecommend,
-    });
+    const mongoClient = await getMongoClient();
+    const db = mongoClient.db(MONGODB_DB);
 
-    const systemInstruction =
-      "You are a MongoDB-powered coding coach that recommends a new practice problem based on the user's stored history and selected preferences. " +
-      agentPrompt;
-    const agentAdvice = (await callGeminiAPI(systemInstruction)).trim();
+    const problems = db.collection(PROBLEMS_COLLECTION);
+    const reviews = db.collection(REVIEWS_COLLECTION);
 
-    return NextResponse.json({
-      agentAdvice,
-      progressSummary: historySummaryRecommend,
-      nextAction: "Solve this new problem and submit your answer to the coach.",
-      problem,
-    });
+    const userId =
+      typeof body.userId === "string" ? body.userId : "local-user";
+
+    /* ---------------- SUBMIT ANSWER ---------------- */
+
+    if (body.command === "submit_answer") {
+      if (
+        typeof body.problemId !== "string" ||
+        typeof body.answer !== "string"
+      ) {
+        return NextResponse.json(
+          { error: "problemId and answer required" },
+          { status: 400 }
+        );
+      }
+
+      const problem = await problems.findOne<Problem>({
+        id: body.problemId,
+      });
+
+      if (!problem) {
+        return NextResponse.json(
+          { error: "Problem not found" },
+          { status: 404 }
+        );
+      }
+
+      let engineResult;
+
+      try {
+        engineResult = await runSubmitAnswerAgent({
+          userId,
+          command: "submit_answer",
+          currentProblem: problem,
+          answer: body.answer,
+          historySummary: "session",
+        });
+      } catch (err) {
+        console.error("Engine error:", err);
+
+        return NextResponse.json(
+          {
+            error: "Agent engine failed. Check server logs.",
+          },
+          { status: 500 }
+        );
+      }
+
+      const evaluation = engineResult.feedback;
+      const assignedDifficulty = engineResult.assignedDifficulty;
+
+      await reviews.insertOne({
+        userId,
+        problemId: problem.id,
+        problemTitle: problem.title,
+        problemDifficulty: problem.difficulty,
+        topic: problem.topic,
+        answer: body.answer,
+        evaluation,
+        assignedDifficulty,
+        createdAt: new Date(),
+      });
+
+      const history = await reviews
+        .find({ userId })
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .toArray();
+
+      const historySummary = summarizeHistory(
+        history as unknown as Array<{ evaluation: Evaluation }>
+      );
+
+      let agentAdvice = "";
+
+      try {
+        const prompt = buildAgentPrompt({
+          userId,
+          command: "submit_answer",
+          currentProblem: problem,
+          evaluation,
+          historySummary,
+        });
+
+        agentAdvice = (await callGeminiAPI(prompt)).trim();
+      } catch (err) {
+        console.error("Gemini error:", err);
+        agentAdvice = "Coach unavailable (Gemini error).";
+      }
+
+      const nextAction =
+        evaluation.correctness === "correct"
+          ? "Try a harder problem"
+          : evaluation.correctness === "partial"
+          ? "Fix issues and retry"
+          : "Review hints and retry";
+
+      return NextResponse.json({
+        feedback: evaluation,
+        assignedDifficulty,
+        agentAdvice,
+        progressSummary: historySummary,
+        nextAction,
+      });
+    }
+
+    /* ---------------- CHAT ---------------- */
+
+    if (body.command === "chat") {
+      if (!body.prompt || typeof body.prompt !== "string") {
+        return NextResponse.json(
+          { error: "Prompt required" },
+          { status: 400 }
+        );
+      }
+
+      try {
+        const reply = await callGeminiAPI(body.prompt);
+
+        return NextResponse.json({
+          agentAdvice: reply,
+        });
+      } catch (err) {
+        console.error("Chat error:", err);
+
+        return NextResponse.json(
+          { error: "Chat failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+    /* ---------------- REVIEW ---------------- */
+
+    if (body.command === "review_progress") {
+      const history = await reviews
+        .find({ userId })
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .toArray();
+
+      const summary = summarizeHistory(
+        history as unknown as Array<{ evaluation: Evaluation }>
+      );
+
+      let advice = "";
+
+      try {
+        advice = await callGeminiAPI(
+          `Summarize progress and suggest next steps:\n${summary}`
+        );
+      } catch (err) {
+        console.error("Review error:", err);
+        advice = "Unable to generate review.";
+      }
+
+      return NextResponse.json({
+        agentAdvice: advice,
+        progressSummary: summary,
+        nextAction: "Continue practicing problems",
+      });
+    }
+
+    /* ---------------- RECOMMEND ---------------- */
+
+    if (body.command === "recommend_problem") {
+      const pipeline: Record<string, unknown>[] = [];
+
+      if (body.topic && body.topic !== "all") {
+        pipeline.push({
+          $match: { topic: body.topic.toLowerCase() },
+        });
+      }
+
+      if (body.difficulty && body.difficulty !== "all") {
+        pipeline.push({
+          $match: { difficulty: body.difficulty.toLowerCase() },
+        });
+      }
+
+      pipeline.push({ $sample: { size: 1 } });
+
+      const [problem] = await problems
+        .aggregate<Problem>(pipeline)
+        .toArray();
+
+      if (!problem) {
+        return NextResponse.json(
+          { error: "No problem found" },
+          { status: 404 }
+        );
+      }
+
+      return NextResponse.json({
+        problem,
+        nextAction: "Solve this problem",
+      });
+    }
+
+    return NextResponse.json(
+      { error: "Unknown command" },
+      { status: 400 }
+    );
+  } catch (err) {
+    console.error("API /agent fatal error:", err);
+
+    return NextResponse.json(
+      {
+        error:
+          err instanceof Error ? err.message : "Server failure",
+      },
+      { status: 500 }
+    );
   }
-
-  return NextResponse.json({ error: "Unknown command." }, { status: 400 });
 }
