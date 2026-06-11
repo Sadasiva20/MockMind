@@ -1,20 +1,21 @@
 #!/usr/bin/env node
 import dotenv from 'dotenv';
-import { GoogleAuth } from 'google-auth-library';
 import fetch from 'node-fetch';
 
 // Load environment variables
 dotenv.config({ path: '.env.local' });
 
-const GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 const GOOGLE_MODEL = process.env.GOOGLE_MODEL;
+const GOOGLE_PROJECT_ID = process.env.GOOGLE_PROJECT_ID;
 
-console.log('🧪 Testing Google AI Model Connection (Service Account Auth)...\n');
+console.log('🧪 Testing Google Gemini (API key auth)...\n');
+console.log(`Project: ${GOOGLE_PROJECT_ID ?? '(not set)'}`);
 console.log(`Model: ${GOOGLE_MODEL}`);
-console.log(`Service Account Credentials: ${GOOGLE_APPLICATION_CREDENTIALS ? '✓ Found' : '✗ Missing'}\n`);
+console.log(`API Key: ${GOOGLE_API_KEY ? '✓ Found' : '✗ Missing'}\n`);
 
-if (!GOOGLE_APPLICATION_CREDENTIALS) {
-  console.error('❌ Error: GOOGLE_APPLICATION_CREDENTIALS not found in .env.local');
+if (!GOOGLE_API_KEY) {
+  console.error('❌ Error: GOOGLE_API_KEY not found in .env.local');
   process.exit(1);
 }
 
@@ -23,29 +24,37 @@ if (!GOOGLE_MODEL) {
   process.exit(1);
 }
 
-async function testGoogleAI() {
+function safeJson(obj) {
   try {
-    // Initialize Google Auth with service account
-    const auth = new GoogleAuth({
-      keyFilename: GOOGLE_APPLICATION_CREDENTIALS,
-      scopes: [
-        'https://www.googleapis.com/auth/cloud-platform',
-        'https://www.googleapis.com/auth/generative-language',
-      ],
-    });
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return String(obj);
+  }
+}
 
-    const client = await auth.getClient();
-    const { token } = await client.getAccessToken();
+async function testGoogleAI() {
+// Try both v1beta and v1 GenerativeService.GenerateContent.
+  // Your 403s reference:
+  // - google.ai.generativelanguage.v1.GenerativeService.GenerateContent
+  // - google.ai.generativelanguage.v1beta.GenerativeService.GenerateContent
+  const endpoints = [
+    {
+      label: 'v1beta',
+      url: `https://generativelanguage.googleapis.com/v1beta/models/${GOOGLE_MODEL}:generateContent?key=${GOOGLE_API_KEY}`,
+    },
+    {
+      label: 'v1',
+      url: `https://generativelanguage.googleapis.com/v1/models/${GOOGLE_MODEL}:generateContent?key=${GOOGLE_API_KEY}`,
+    },
+  ];
 
-    console.log('📡 Sending test prompt to Google AI...\n');
+  for (const ep of endpoints) {
+    console.log(`📡 Attempt (${ep.label}): ${ep.url}`);
 
-    // Send a simple test prompt via REST API
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1/models/${GOOGLE_MODEL}:generateContent`,
-      {
+    try {
+      const response = await fetch(ep.url, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -59,29 +68,46 @@ async function testGoogleAI() {
             },
           ],
         }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const responseText =
+          data?.candidates?.[0]?.content?.parts?.[0]?.text || 'No response';
+
+        console.log('✅ Success!');
+        console.log('Response:');
+        console.log('─'.repeat(50));
+        console.log(responseText);
+        console.log('─'.repeat(50));
+        console.log('\n✨ Gemini API is reachable with the current API key.');
+        return;
       }
-    );
 
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(`API Error: ${response.status} - ${JSON.stringify(error)}`);
+      const bodyText = await response.text();
+      let parsed = null;
+      try {
+        parsed = JSON.parse(bodyText);
+      } catch {
+        // ignore
+      }
+
+      console.error(`❌ HTTP ${response.status} (${ep.label})`);
+      if (parsed) {
+        console.error(safeJson(parsed));
+      } else {
+        console.error(bodyText);
+      }
+    } catch (err) {
+      console.error(`❌ Network/Fetch error (${ep.label}):`, err);
     }
-
-    const data = await response.json();
-    const responseText = data?.candidates?.[0]?.content?.parts?.[0]?.text || 'No response';
-
-    console.log('✅ Success! Google AI Model is working correctly.\n');
-    console.log('Response:');
-    console.log('─'.repeat(50));
-    console.log(responseText);
-    console.log('─'.repeat(50));
-    console.log('\n✨ Service account authentication test passed!');
-
-  } catch (error) {
-    console.error('❌ Error connecting to Google AI Model:');
-    console.error(error.message);
-    process.exit(1);
   }
+
+  console.error(
+    '\n❌ All attempts failed. If you see SERVICE_DISABLED or API_KEY_SERVICE_BLOCKED, you must enable/allow the Gemini/Generative Language API for the project associated with the API key.'
+  );
+  process.exit(1);
 }
 
 testGoogleAI();
+

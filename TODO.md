@@ -1,7 +1,12 @@
-- [ ] Remove committed credential file(s) (service-account-key.json) from repo
-- [ ] Add service account key filename(s) to .gitignore
-- [ ] Update code to use env-based service account auth (GOOGLE_APPLICATION_CREDENTIALS) without any committed JSON key
-- [ ] Ensure README does not instruct committing the key
-- [ ] Revoke/rotate leaked Google service account key in GCP
-- [ ] Re-run local checks (lint/test/build) after changes
+## Task: Remove google-auth-library / GOOGLE_APPLICATION_CREDENTIALS / getAccessToken / Vertex AI endpoint usage
+
+### Plan
+- Information Gathered: No usage found in `app/lib/gemini-service.ts` and `app/lib/gemini-service-safe.ts`.
+- Found usage in `test-google-ai.js` only.
+
+### Steps
+1. Remove `google-auth-library` usage and related env vars/token retrieval from `test-google-ai.js`.
+2. Update the script to use the same API key-based approach as `app/lib/gemini-service-safe.ts` (or convert to a lightweight connectivity check).
+3. Re-run `npm test` / any existing lint/build commands if present.
+4. Spot-check remaining files for the removed strings.
 
