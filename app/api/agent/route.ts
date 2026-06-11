@@ -109,9 +109,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    /* =========================
+       🔥 ENV DEBUG (REFERENCE BLOCK)
+       ========================= */
+    console.log("=== AGENT ENV CHECK ===");
+    console.log("PROJECT:", process.env.GOOGLE_CLOUD_PROJECT);
+    console.log("LOCATION:", process.env.GOOGLE_CLOUD_LOCATION);
+    console.log("MODEL:", process.env.GOOGLE_MODEL);
+    console.log("HAS_AI_CONFIG:", hasAIConfig());
+    console.log("=======================");
+
     if (!hasAIConfig()) {
       return NextResponse.json(
-        { error: "AI not configured (missing GOOGLE_API_KEY)" },
+        {
+          error: "AI not configured",
+          debug: {
+            hasProject: Boolean(process.env.GOOGLE_CLOUD_PROJECT),
+            hasKey: Boolean(process.env.GOOGLE_API_KEY),
+          },
+        },
         { status: 500 }
       );
     }
@@ -123,7 +139,9 @@ export async function POST(request: NextRequest) {
     const reviews = db.collection(REVIEWS_COLLECTION);
 
     const userId =
-      typeof body.userId === "string" ? body.userId : "local-user";
+      typeof body.userId === "string"
+        ? body.userId
+        : "local-user";
 
     /* ---------------- SUBMIT ANSWER ---------------- */
 
@@ -163,9 +181,7 @@ export async function POST(request: NextRequest) {
         console.error("Engine error:", err);
 
         return NextResponse.json(
-          {
-            error: "Agent engine failed. Check server logs.",
-          },
+          { error: "Agent engine failed" },
           { status: 500 }
         );
       }
@@ -196,24 +212,32 @@ export async function POST(request: NextRequest) {
       );
 
       let agentAdvice = "";
+
       try {
-         const prompt = buildAgentPrompt({
-         userId,
-         command: "submit_answer",
-        currentProblem: problem,
-        evaluation,
-        historySummary,
-  });
+        const prompt = buildAgentPrompt({
+          userId,
+          command: "submit_answer",
+          currentProblem: problem,
+          evaluation,
+          historySummary,
+        });
 
-  agentAdvice = (await callGeminiAPI(prompt)).trim();
-} catch (err) {
-  console.error("Gemini error FULL:", err);
+        console.log("=== GEMINI PROMPT ===");
+        console.log(prompt);
+        console.log("====================");
 
-  agentAdvice =
-    err instanceof Error
-      ? `Gemini failed: ${err.message}`
-      : `Gemini failed: ${String(err)}`;
-}
+        agentAdvice = (await callGeminiAPI(prompt)).trim();
+
+        console.log("=== GEMINI SUCCESS ===");
+      } catch (err) {
+        console.error("🔥 GEMINI FULL ERROR:", err);
+
+        agentAdvice =
+          err instanceof Error
+            ? `Gemini failed: ${err.message}`
+            : `Gemini failed: ${String(err)}`;
+      }
+
       const nextAction =
         evaluation.correctness === "correct"
           ? "Try a harder problem"
