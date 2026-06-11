@@ -196,22 +196,24 @@ export async function POST(request: NextRequest) {
       );
 
       let agentAdvice = "";
-
       try {
-        const prompt = buildAgentPrompt({
-          userId,
-          command: "submit_answer",
-          currentProblem: problem,
-          evaluation,
-          historySummary,
-        });
+         const prompt = buildAgentPrompt({
+         userId,
+         command: "submit_answer",
+        currentProblem: problem,
+        evaluation,
+        historySummary,
+  });
 
-        agentAdvice = (await callGeminiAPI(prompt)).trim();
-      } catch (err) {
-        console.error("Gemini error:", err);
-        agentAdvice = "Coach unavailable (Gemini error).";
-      }
+  agentAdvice = (await callGeminiAPI(prompt)).trim();
+} catch (err) {
+  console.error("Gemini error FULL:", err);
 
+  agentAdvice =
+    err instanceof Error
+      ? `Gemini failed: ${err.message}`
+      : `Gemini failed: ${String(err)}`;
+}
       const nextAction =
         evaluation.correctness === "correct"
           ? "Try a harder problem"
