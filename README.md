@@ -25,6 +25,7 @@ This project was inspired by interview prep tools and AI-assisted learning platf
 
 1. Install dependencies:
 
+
 ```bash
 npm install
 ```
